@@ -1,0 +1,381 @@
+---
+title: "Churn Prediction"
+author: "Yaswanth Kumar Reddy"
+date: "June 04, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Problem Statement
+
+In telecom domain where the customer acquisition has higher cost than customer retention and where there is a rampant price war, it becomes important to predict and profile the customer behavior and predict them so that offers can be rolled out to retain them prior to switching.
+ 
+Data consist of the various behavior of customers and the last column states if the customer is still with the existing telecom company or not.
+
+## Objective
+
+1. Understand factors contributing to customer churn.
+2. Build a churn prediction model.
+3. Model evaluation.
+4. What can be done to restrict customers from churning.
+
+```{r eval=FALSE, echo=FALSE}
+setwd("E:/My Work/Dataset/Telecom Churn")
+```
+
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(gridExtra)
+library(caret)
+library(Deducer)
+library(randomForest)
+```
+
+## Data Overview
+
+Read the data
+
+```{r}
+dat <- read.csv("data.csv")
+```
+
+Looking at the summary of the data. *Churn* is our target variable.
+
+```{r eval=FALSE}
+summary(dat)
+head(dat)
+```
+
+From the summary of the data it is observed that there are no missing values. For a confirmation we shall check again if there are any NAs in each column .
+
+```{r}
+colSums(is.na(dat))
+```
+
+```{r}
+dim(dat)
+```
+
+The distribution of target variable is more or less fine .
+
+```{r}
+prop.table(table(dat$Churn))
+```
+
+## Data Cleaning/Data Preprocessing
+
+This step essentially involves in 
+
+1. Cleaning/Fromatting/Transforming the data.
+2. Treating missing values/outliers if any.
+3. Creating new features from existing ones.
+
+Converting *Area.Code* and *Churn* to factor
+```{r}
+dat$Area.code = as.factor(dat$Area.code)
+dat$Churn <- as.factor(dat$Churn)
+```
+
+Assuming Account.Length attribute as the age of the customer since using the network. I assume it is in no. of days.  
+This feature is a continuous variable and may not give us an exact outlook on churning customers based on their age. So creating different bins might be useful.
+
+```{r}
+dat$Acc.Length.Bin <- ifelse(dat$Account.length > 0 & dat$Account.length <= 30, '0-30 days',
+                             ifelse(dat$Account.length > 30 & dat$Account.length <= 60, '30-60 days',
+                                    ifelse(dat$Account.length > 60 & dat$Account.length <= 90, '60-90 days',
+                                           ifelse(dat$Account.length > 90 & dat$Account.length <= 120, '90-120 days',
+                                           ifelse(dat$Account.length > 120 & dat$Account.length <= 180, '120-180 days','>180 days')))))
+
+table(dat$Acc.Length.Bin)
+```
+
+We have different features based on the call timings as *day_calls*, *eve_calls*, *night_calls*. Though it is good to have these details separately let us create new feature for each of them combinedly and see if we can find something from this.
+
+```{r}
+dat$Total.minutes <- dat$Total.day.minutes + dat$Total.eve.minutes + dat$Total.night.minutes
+dat$Total.calls <- dat$Total.day.calls + dat$Total.eve.calls + dat$Total.night.calls
+dat$Total.charge <- dat$Total.day.charge + dat$Total.eve.charge + dat$Total.night.charge
+```
+
+Checking outliers newly created features.
+
+```{r echo=FALSE}
+par(mfrow = c(1,3))
+boxplot(dat$Total.minutes, main = 'Total_Minutes')
+boxplot(dat$Total.calls, main = 'Total_Calls')
+boxplot(dat$Total.charge, main = 'Total_Charge')
+```
+
+There are very few Outliers which can be ignored. *Total.charge* has more outliers compared to other 2 variables but the data is not skewed eventhough it has outliers.
+
+So, for now we will end preprocessing here. Incase if we need to create new features while doing exploratory analysis we can do it as needed.
+
+##Exploratory Analysis
+
+Exploratory data analysis is one of the major steps in data modelling. What we can do or get from this step is:
+
+1. Know the variables better by visualizing.
+2. Find the variables which are impacting customer churn.
+3. Find patterns and behaviour of customers.
+
+#### Area wise Churn customers
+
+From below plot we can see that *415* area has the most customers and obviously churn customers is also high compared to other 2 areas.
+
+```{r echo=FALSE}
+ggplot(dat, aes(x = Area.code)) + geom_bar(aes(fill = Churn), width = 0.4) + labs(title = "Area wise Churn") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+#### Churn based on Age
+
+Looking at the plot, we have most of our customers whose age is more than 60 days and most of the churn happens here.
+
+```{r echo=FALSE}
+ggplot(dat, aes(x=factor(dat$Acc.Length.Bin, levels = c('0-30 days', '30-60 days','60-90 days','90-120 days', '120-180 days','>180 days')))) + geom_bar(aes(fill = Churn),width = 0.4) + labs(title = 'Churn based on Age on Network', x = 'Age on Network') + theme(plot.title = element_text(hjust = 0.5))
+```
+
+#### International Plan Customers
+
+Well we have something here. It is observed that *~ 42%* of customers who opted for international plan are churning out. 
+
+```{r}
+# ggplot(dat, aes(Churn)) + geom_bar() + facet_wrap(~International.plan, scales = 'free')
+ggplot(dat, aes(International.plan, fill = Churn)) + geom_bar(position = "fill", width = 0.4) + labs(y = 'Churn rate')
+
+```
+
+Is it because of high charges for international calls? We shall find out by crunching the data based on international calls.
+
+```{r}
+dat %>% group_by(International.plan) %>% summarise(Avg_Intl_Charges = mean(Total.intl.charge))
+```
+
+Ok, so it is observed that eventhough customers have opted for a plan they are charged more than the customers who have not opted the plan.
+
+We shall check how these charges vary across each area.
+
+```{r}
+dat %>% group_by(Area.code, International.plan) %>% summarise(Avg_Intl_Charges = round(mean(Total.intl.charge),2))
+```
+We see that areas *408* and *415* charge more eventhough customers have international plan. Area *510* have appro. the same charges for all customers.
+
+From this we shall check whether the churn rate varies across areas for the customers with and without plan.
+
+```{r message=FALSE}
+dat.melt <- melt(dat[,c('Area.code', 'International.plan','Churn')], id = c('Area.code','International.plan'))
+dat.cast <- dcast(dat.melt, Area.code+International.plan ~ value)
+names(dat.cast) <- c('Area.code','International.plan','churn_false','churn_true')
+dat.cast$churn_false_rate <- dat.cast$churn_false/(dat.cast$churn_false+dat.cast$churn_true)
+dat.cast$churn_true_rate <- dat.cast$churn_true/(dat.cast$churn_false+dat.cast$churn_true)
+
+#ggplot(dat.cast, aes(Area.code, y=churn_true_rate, fill = International.plan))+geom_bar(stat = 'identity')
+ggplot(dat.cast[dat.cast$International.plan=='Yes',], aes(Area.code, y=churn_true_rate))+geom_bar(stat = 'identity', width = 0.4)
+
+```
+
+Eventhough *510* charges are low compared to others, the churn is on par with rest of the areas.
+
+#### Customer Service Calls
+
+Ideally if there are calls to customer service then it might be for general enquiry or issues the customers are facing. If the calls to customer service are more it is likely that customer might churn.
+
+We shall check if this holds true in our data.
+
+```{r}
+ggplot(dat, aes(x=factor(Customer.service.calls))) + geom_bar(aes(fill = Churn), position = 'fill') + labs(x = 'No. of Customer Service Calls', y = 'Churn rate')
+```
+
+Well it is true that more calls to customer service and more likely the customer is not happy and is likely to churn.
+
+As we already know that subscribers with International pack are not happy let us check if these are the customers making calls to customer service.
+
+```{r}
+ggplot(dat, aes(x=factor(Customer.service.calls))) + geom_bar(aes(fill = International.plan), position = 'fill') + labs(x = 'No. of Customer Service Calls', y = 'Churn rate')
+```
+
+It is surprising to see that most of the calls are made by customers without International plan. So, we can assume that customers have some other issue may be related to network or any other service.
+
+We shall check if these calls are specific to any area.
+
+```{r}
+ggplot(dat, aes(x=factor(Customer.service.calls))) + geom_bar(aes(fill = Churn), position = 'fill') + facet_grid(~ Area.code) + labs(x = 'No. of Customer Service Calls', y = 'Churn rate')
+```
+
+calls vs churn are more likely in area *408* and less in *510*.
+
+There is atleast 60% chance that customers with more than 5 calls are likely to churn in all areas.
+
+Below plot shows the calls made by different age groups. It is pretty clear that customers between *90-120 days* bucket have high proportion of calls and churn.
+
+```{r}
+grid.arrange(ggplot(dat, aes(x= factor(Customer.service.calls))) + geom_bar(aes(fill = Churn), position = 'fill') + facet_grid(~factor(dat$Acc.Length.Bin, levels = c('0-30 days', '30-60 days','60-90 days','90-120 days', '120-180 days','>180 days'))) + labs(x='Customer Service calls', y='Churn rate'), nrow =2)
+```
+
+Based on above plot let us create a new feature for average no. of days to make a call to customer service.
+
+We have customers with 0 calls and we get division error so let me set this to the actual age itself if calls is 0.
+```{r}
+dat$Avgdays_percall <- ifelse(dat$Customer.service.calls == 0, dat$Account.length, dat$Account.length/dat$Customer.service.calls)
+```
+
+
+```{r}
+g1 <- ggplot(dat, aes(x=Area.code, y=Total.minutes)) + geom_bar(stat = 'identity')
+g2 <- ggplot(dat, aes(x=Area.code, y=Total.calls)) + geom_bar(stat = 'identity')
+g3 <- ggplot(dat, aes(x=Area.code, y=Total.charge)) + geom_bar(stat = 'identity')
+grid.arrange(g1,g2,g3)
+```
+
+*415* area has the most customers so obviously the minutes and calls would he higher from here. We shall look at average minutes and calls made.
+
+```{r}
+dat %>% group_by(Area.code) %>% summarise(Avg_Minutes = mean(Total.minutes), Avg_calls = mean(Total.calls), Avg_charges = mean(Total.charge))
+```
+
+Average minutes used and average calls are more or less the same across all areas.
+
+Let us see if minutes used varies acroos different times.
+
+```{r}
+dat %>% group_by(Churn) %>% summarise(Avg_day_mins = mean(Total.day.minutes),
+                                      Avg_eve_mins = mean(Total.eve.minutes),
+                                      Avg_nit_mins = mean(Total.night.minutes))
+```
+
+So, relatiely customers churning out are speaking more. 
+
+Also these customers more or less talk for same duration irrespective of the timing. But if you see non churners are using less during day compared to evening and night.
+
+We are good to go with building the model. 
+
+We have few variables like State, Voice.mail.plan etc. which might be of least importance. We will be building the model without those variables and later on add these and see. 
+
+## Model Building
+
+As an intial step we will go with Logistic regression and see how the variables perform.
+
+Before that we will be splitting the dataframe into train and test (70:30) to validate our model.
+
+```{r}
+set.seed(64)
+index <- sample(1:nrow(dat), size = nrow(dat) * 0.7)
+train <- dat[index,]
+test <- dat[-index,]
+```
+
+#### Logistic Regression
+
+```{r}
+lr_model <- glm(Churn ~ International.plan+Customer.service.calls+Total.charge+Avgdays_percall+Total.intl.minutes+Total.intl.calls+Total.intl.charge+Voice.mail.plan, family = 'binomial', data = train)
+
+summary(lr_model)
+```
+
+As expected *International.plan* and *Customer.service.calls* are more significant. Similarly *Total.charge* and *Voice.mail.plan*.
+
+From the initial model *Acc.Length.Bin* doesn't add any value to the model. Same is the case with *Area.code* as well. We will remove these from our model.
+
+Based on the coefficients we shall find the Odds ratio.
+
+#### Interpretation based on Odds Ratio
+
+```{r}
+#Odds ratio
+exp(coef(lr_model))
+
+#Probability
+exp(coef(lr_model))/(1+exp(coef(lr_model)))
+```
+
+Based on the probabilities we can see that if a customer opts for International plan then the odds that he will churn is 89% compared to non churning customer. Similarly if a subscribers call to customer service increases by 1 unit, then the odds that he will churn is 64% compared to who doesn't make a call.
+
+But it is interesting to see that *Total.Intl.charge* was not significant in our model but the odds says that if there is 1 unit increase in charge, then it is 96% likely that customer will churn.
+
+#### Model validation
+
+```{r}
+train_prob <- ifelse(lr_model$fitted.values > 0.5, TRUE, FALSE)
+confusionMatrix(train_prob, train$Churn)
+```
+
+We have achieved an accuracy of 85.8% which is actually good.
+
+At 97% we have a high Sensitivity which predicts actual non-churners correctly but very low Specificity at 22.3% which means we are predicting actual churners as non churners.
+
+#### ROC Plot
+
+ROC curve is a plot of True positive rate and false positive rate at different cutoff points.
+
+```{r}
+rocplot(lr_model)
+```
+
+Area Under Curve(AUC) at 82% shows our model has good results.
+
+#### Prediction on Test Data
+
+```{r}
+lr_pred <- predict(lr_model, newdata = test, type = 'response')
+test_prob <- ifelse(lr_pred > 0.5, TRUE, FALSE)
+confusionMatrix(test_prob, test$Churn)
+```
+
+The model accuracy on unseen test data is 86.2% which is which is a bit higher than train model accuracy. However the specificity rate 23.1% is also higher than what we achieved on train data.
+
+#### RandomForest Model
+
+```{r warning=FALSE, message=FALSE}
+rf_model <- randomForest(Churn ~ International.plan+Customer.service.calls+Total.charge+Avgdays_percall+Total.intl.minutes+Total.intl.calls+Total.intl.charge+Voice.mail.plan, data = train, ntree = 750)
+print(rf_model)
+```
+
+Wow Randomforest has done an amazing job. The out-of-bag error rate is 2.96% which means our accuracy is 97%. That is really a fantastic model.
+
+We shall check how this performs on test data.
+```{r}
+test_rf <- predict(rf_model, newdata = test)
+table(test_rf, test$Churn)
+```
+
+Accuracy on test data is 97.8%. 
+
+So, from whatever models we have built we can consider Randomforest model due to high accuracy in predicting churn customers.
+
+## Conclusion
+
+An operator loses its customers due to various reasons. Churn can affect company's overall growth and the reputation also goes down in the market.
+
+For the data provided the customer churn is significantly affected by following variables.
+
+1. **International Plan** : We have seen that customers with International pack are likely to churn which was evident our analysis and in the model also.
+2. **Customer Service calls** : This was another major contributor for churn. The telecom operator has to keep their customers happy to reduce churn.
+3. **Total Charge** : This was another variable which was very significant. May be the customers are not happy with the charges by the telecom operator.
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
